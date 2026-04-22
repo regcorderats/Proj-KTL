@@ -1,41 +1,45 @@
 # ============================================================
-# BƯỚC 5: BOOTSTRAP STANDARD ERRORS CHO OAXACA DECOMPOSITION
+# BƯỚC 5: BOOTSTRAP OAXACA DECOMPOSITION (ĐÃ VÁ LỖI THIẾU CỘT)
 # ============================================================
 library(dplyr)
-library(tidyr)
 
-# 1. CHUẨN BỊ MẪU GỐC (Dùng lại df_male và df_female từ Bước 1)
-# Đảm bảo df_male và df_female đã có đầy đủ các biến tạo ra từ create_model_vars()
-# và các biến 2-digit.
+cat("\n--- BƯỚC 0: ĐỒNG BỘ DỮ LIỆU TRƯỚC KHI BOOTSTRAP ---\n")
+# Trích xuất các biến Lương/Ngành/Nghề từ df_workers để ghép ngược lại
+cols_to_join <- df_workers %>%
+  select(ID_CA_NHAN, ln_Hourly_Wage, Sector, Ind_section, Occ_2digit_clean)
 
-set.seed(2026) # Khóa seed để kết quả có thể tái lập
-B <- 500       # Số vòng lặp (Hội đồng thường yêu cầu 500 - 1000)
+# Ghép vào tập gốc
+df_male_boot_ready <- df_male %>% left_join(cols_to_join, by = "ID_CA_NHAN")
+df_female_boot_ready <- df_female %>% left_join(cols_to_join, by = "ID_CA_NHAN")
 
-# Khởi tạo ma trận lưu kết quả
+cat("Đã cập nhật đủ cột cho df_male_boot_ready và df_female_boot_ready!\n")
+
+
+# ============================================================
+# VÒNG LẶP BOOTSTRAP
+# ============================================================
+set.seed(2026)
+B <- 500       
+
 boot_results <- matrix(NA, nrow = B, ncol = 4)
 colnames(boot_results) <- c("Total_Gap", "Endowments", "Discrimination", "Selection")
 
-cat("\nKhởi động Bootstrap", B, "vòng. Sẽ mất một chút thời gian...\n")
+# Xác định trước các biến cần thiết để subset bằng Base R
+vars_needed <- c("ln_Hourly_Wage", "Potential_Experience", "Experience_Squared",
+                 "Highest_Qualification", "Marital_Status", "Urban", "Sector",
+                 "Ind_section", "Occ_2digit_clean")
 
-# 2. VÒNG LẶP BOOTSTRAP
+cat("\nKhởi động Bootstrap", B, "vòng...\n")
+
 for (i in 1:B) {
-  
-  # In tiến độ mỗi 50 vòng để theo dõi
   if (i %% 50 == 0) cat("Đang chạy vòng thứ:", i, "/", B, "\n")
   
   tryCatch({
-    # ----------------------------------------------------
-    # Bước 2.1: Lấy mẫu ngẫu nhiên có hoàn lại (Stratified)
-    # ----------------------------------------------------
-    idx_M <- sample(1:nrow(df_male), nrow(df_male), replace = TRUE)
-    idx_F <- sample(1:nrow(df_female), nrow(df_female), replace = TRUE)
+    # 1. Resample từ tập dữ liệu ĐÃ VÁ LỖI
+    boot_M_full <- df_male_boot_ready[sample(nrow(df_male_boot_ready), replace = TRUE), ]
+    boot_F_full <- df_female_boot_ready[sample(nrow(df_female_boot_ready), replace = TRUE), ]
     
-    boot_M_full <- df_male[idx_M, ]
-    boot_F_full <- df_female[idx_F, ]
-    
-    # ----------------------------------------------------
-    # Bước 2.2: Chạy lại Probit và tính IMR MỚI trên tập Boot Nữ
-    # ----------------------------------------------------
+    # 2. Re-estimate Selection Equation cho Nữ
     probit_F_boot <- glm(
       LFP ~ Potential_Experience + Experience_Squared + Highest_Qualification + 
         Urban + Marital_Status + as.factor(TINH) + Has_Available_GP,
@@ -47,24 +51,15 @@ for (i in 1:B) {
     Z_gamma_boot <- predict(probit_F_boot, type = "link")
     boot_F_full$IMR_new <- dnorm(Z_gamma_boot) / pnorm(Z_gamma_boot)
     
-    # ----------------------------------------------------
-    # Bước 2.3: Lọc dữ liệu Wage (LFP == 1) và drop NA cho OLS
-    # ----------------------------------------------------
-    vars_to_drop_na <- c("ln_Hourly_Wage", "Potential_Experience", "Highest_Qualification",
-                         "Marital_Status", "Urban", "Sector", "TINH", "VUNG",
-                         "Ind_section", "Occ_2digit_clean")
+    # 3. Lọc người đi làm (LFP = 1)
+    boot_wage_M <- boot_M_full[boot_M_full$LFP == 1, ]
+    boot_wage_F <- boot_F_full[boot_F_full$LFP == 1, ]
     
-    boot_wage_M <- boot_M_full %>% 
-      filter(LFP == 1) %>% 
-      drop_na(all_of(vars_to_drop_na))
+    # Lọc bỏ NA trên các cột cần thiết cho OLS
+    boot_wage_M <- na.omit(boot_wage_M[, vars_needed])
+    boot_wage_F <- na.omit(boot_wage_F[, c(vars_needed, "IMR_new")])
     
-    boot_wage_F <- boot_F_full %>% 
-      filter(LFP == 1) %>% 
-      drop_na(all_of(c(vars_to_drop_na, "IMR_new")))
-    
-    # ----------------------------------------------------
-    # Bước 2.4: Chạy OLS (Model B_fine)
-    # ----------------------------------------------------
+    # 4. Chạy OLS
     ols_M_boot <- lm(
       ln_Hourly_Wage ~ Potential_Experience + Experience_Squared +
         Highest_Qualification + Marital_Status + Urban + Sector +
@@ -79,33 +74,25 @@ for (i in 1:B) {
       data = boot_wage_F
     )
     
-    # ----------------------------------------------------
-    # Bước 2.5: Trích xuất và Đồng bộ Hệ số cho Oaxaca
-    # ----------------------------------------------------
+    # 5. Đồng bộ ma trận và tính toán Oaxaca
     beta_M_boot <- coef(ols_M_boot)
     beta_F_full_boot <- coef(ols_F_boot)
-    
     theta_F_boot <- beta_F_full_boot["IMR_new"]
     
-    # Đồng bộ beta_F theo Nam
     male_vars_boot <- names(beta_M_boot)
     beta_F_boot <- beta_F_full_boot[male_vars_boot]
     beta_F_boot[is.na(beta_F_boot)] <- 0
     names(beta_F_boot) <- male_vars_boot
     
-    # Đồng bộ X_bar
     X_bar_M_boot <- colMeans(model.matrix(ols_M_boot))
     X_bar_F_full_boot <- colMeans(model.matrix(ols_F_boot))
-    
     lambda_bar_F_boot <- X_bar_F_full_boot["IMR_new"]
     
     X_bar_F_boot <- X_bar_F_full_boot[male_vars_boot]
     X_bar_F_boot[is.na(X_bar_F_boot)] <- 0
     names(X_bar_F_boot) <- male_vars_boot
     
-    # ----------------------------------------------------
-    # Bước 2.6: Tính toán cấu phần Oaxaca và Lưu kết quả
-    # ----------------------------------------------------
+    # 6. Lắp công thức
     Endowments_boot <- sum((X_bar_M_boot - X_bar_F_boot) * beta_M_boot)
     Discrimination_boot <- sum(X_bar_F_boot * (beta_M_boot - beta_F_boot))
     Selection_boot <- - (theta_F_boot * lambda_bar_F_boot)
@@ -114,28 +101,35 @@ for (i in 1:B) {
     boot_results[i, ] <- c(Total_Gap_boot, Endowments_boot, Discrimination_boot, Selection_boot)
     
   }, error = function(e) {
-    # Nếu vòng lặp bị lỗi do rớt level của dummy, hệ thống sẽ im lặng chuyển sang vòng sau
-    # Dòng này sẽ trả về NA, ta sẽ loại bỏ NA ở bước tính toán cuối cùng
+    cat("\n[!] Lỗi ở vòng", i, ":", conditionMessage(e), "\n")
   })
 }
 
-# 3. XỬ LÝ KẾT QUẢ BOOTSTRAP VÀ TÍNH STANDARD ERROR
-# Loại bỏ các vòng lặp bị lỗi (NA)
+# ============================================================
+# TÍNH TOÁN KHOẢNG TIN CẬY BOOTSTRAP (PERCENTILE METHOD)
+# ============================================================
 boot_results_clean <- na.omit(boot_results)
-successful_loops <- nrow(boot_results_clean)
+cat("\nSố vòng Bootstrap thành công:", nrow(boot_results_clean), "/", B, "\n")
 
-cat("\nSố vòng Bootstrap thành công:", successful_loops, "/", B, "\n")
-
-# Tính Standard Deviation (Chính là Standard Error của hệ số)
-boot_se <- apply(boot_results_clean, 2, sd)
-
-# Gắn SE vào bảng kết quả gốc của bạn
-# (Giả sử bạn đã có dataframe Oaxaca_Final từ script trước)
-Oaxaca_Final$Std_Error <- boot_se
-Oaxaca_Final$t_value <- Oaxaca_Final$Value / Oaxaca_Final$Std_Error
-Oaxaca_Final$p_value <- 2 * pt(-abs(Oaxaca_Final$t_value), df = nrow(df_wage) - length(coef(ols_male_Bfine)))
-
-cat("\n===========================================================\n")
-cat("   BẢNG OAXACA CUỐI CÙNG (VỚI BOOTSTRAP STANDARD ERRORS)   \n")
-cat("===========================================================\n")
-print(Oaxaca_Final, row.names = FALSE)
+if(nrow(boot_results_clean) > 0) {
+  boot_se <- apply(boot_results_clean, 2, sd)
+  boot_ci_lower <- apply(boot_results_clean, 2, function(x) quantile(x, probs = 0.025))
+  boot_ci_upper <- apply(boot_results_clean, 2, function(x) quantile(x, probs = 0.975))
+  
+  Oaxaca_Final$Std_Error <- boot_se
+  Oaxaca_Final$CI_95_Lower <- boot_ci_lower
+  Oaxaca_Final$CI_95_Upper <- boot_ci_upper
+  
+  Oaxaca_Final$Significant <- ifelse(
+    (Oaxaca_Final$CI_95_Lower > 0 & Oaxaca_Final$CI_95_Upper > 0) | 
+      (Oaxaca_Final$CI_95_Lower < 0 & Oaxaca_Final$CI_95_Upper < 0), 
+    "Yes (***)", "No"
+  )
+  
+  cat("\n===========================================================\n")
+  cat("   BẢNG OAXACA CUỐI CÙNG (BOOTSTRAP 95% CONFIDENCE INTERVAL)\n")
+  cat("===========================================================\n")
+  print(Oaxaca_Final[, c("Component", "Value", "Std_Error", "CI_95_Lower", "CI_95_Upper", "Significant")], row.names = FALSE)
+} else {
+  cat("\n[!] Tất cả các vòng lặp đều thất bại. Hãy kiểm tra lại log lỗi.\n")
+}
