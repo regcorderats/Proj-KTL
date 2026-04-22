@@ -5,24 +5,51 @@
 # ============================================================
 
 # ============================================================
-# 0. CÀI ĐẶT & NẠP THƯ VIỆN
+# 0. TỰ ĐỘNG CÀI ĐẶT & NẠP THƯ VIỆN
 # ============================================================
-library(haven)      
-library(dplyr)      
-library(ggplot2)    
-library(DescTools)  
-library(readr)      
-library(tidyr)
+# Danh sách các gói (packages) cần thiết cho toàn bộ dự án
+required_packages <- c(
+  "haven",      # Đọc file dta của Stata
+  "dplyr",      # Xử lý dữ liệu
+  "ggplot2",    # Vẽ biểu đồ
+  "DescTools",  # Tính toán thống kê (Winsorize)
+  "readr",      # Xuất/Nhập file csv tốc độ cao
+  "tidyr",      # Dọn dẹp dữ liệu (drop_na)
+  "car"         # Chạy kiểm định linearHypothesis cho OLS/Probit
+)
 
+# Kiểm tra máy tính hiện tại đã cài các gói này chưa, nếu chưa thì tự động tải về
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) {
+  cat("\nĐang cài đặt các thư viện còn thiếu:", paste(new_packages, collapse = ", "), "\n")
+  install.packages(new_packages, dependencies = TRUE)
+}
+
+# Nạp tất cả thư viện
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Tự động tạo thư mục output nếu chưa tồn tại
 dir.create("output", showWarnings = FALSE)
 
+
 # ============================================================
-# 1. NẠP FILE DỮ LIỆU GỐC
+# 1. NẠP FILE DỮ LIỆU GỐC (DÙNG ĐƯỜNG DẪN TƯƠNG ĐỐI)
 # ============================================================
-df_raw <- read_dta("C:/Users/Wayn/Downloads/LFS_2018 (3)_cut_dup.dta", encoding = "CP1258")
+# Khai báo đường dẫn tương đối (File script và folder 'data' phải nằm cùng 1 chỗ)
+data_path <- "data/LFS_2018.dta"
+
+# Bẫy lỗi bảo vệ: Cảnh báo người dùng nếu họ quên bỏ file dta vào đúng chỗ
+if (!file.exists(data_path)) {
+  stop("LỖI CHÍ MẠNG: Không tìm thấy dữ liệu! Vui lòng copy file LFS_2018.dta vào thư mục 'data/' nằm cùng chỗ với script này.")
+}
+
+df_raw <- read_dta(data_path, encoding = "CP1258")
+
 cat("=== DỮ LIỆU GỐC ===\n")
 cat("Số quan sát :", nrow(df_raw), "\n")
 cat("Số biến     :", ncol(df_raw), "\n")
+
+# ... (GIỮ NGUYÊN TỪ PHẦN "df_hh_level <- df_raw %>%" CỦA BẠN TRỞ ĐI) ...
 
 df_hh_level <- df_raw %>%
   mutate(
@@ -311,10 +338,6 @@ df_workers %>%
 
 cat("Occ 2digit categories:", nlevels(df_workers$Occ_2digit_clean), "\n")
 cat("Ind section categories:", nlevels(df_workers$Ind_section), "\n")
-
-# ── Sau đó mới đến write_csv ──────────────────────────────────────
-write_csv(df, "output/clean_data.csv")
-write_csv(df_workers, "output/clean_data_workers.csv")
 
 # ============================================================
 # 9. XUẤT FILE SẠCH
